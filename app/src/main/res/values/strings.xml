@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Privacy Shield</string>
+    <string name="protection_unavailable">Protection is not available yet</string>
+    <string name="foundation_description">VPN forwarding and DNS filtering are still in development. No network traffic is being filtered.</string>
+</resources>

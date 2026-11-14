@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Privacy Shield</string>
+    <string name="protection_unavailable">Захист ще недоступний</string>
+    <string name="foundation_description">Пересилання трафіку через VPN і фільтрація DNS ще розробляються. Мережевий трафік не фільтрується.</string>
+</resources>
