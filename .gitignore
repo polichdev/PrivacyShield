@@ -1,5 +1,17 @@
+# Gradle & Build outputs
 .gradle/
+build/
 **/build/
-local.properties
-.idea/
 *.iml
+.idea/
+.kotlin/
+local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Agent directory
+agent/
+/agent/
