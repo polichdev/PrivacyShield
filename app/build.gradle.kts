@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.privacyshield"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 19
+        versionName = "0.3.9"
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -26,6 +26,15 @@ android {
 dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
     implementation(libs.activity.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.coroutines.android)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.session)
     testImplementation(libs.junit)
+    testImplementation(libs.coroutines.test)
 }
+
