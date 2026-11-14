@@ -1,4 +1,4 @@
-package com.example.privacyshield.filtering
+﻿package com.example.privacyshield.filtering
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -36,4 +36,33 @@ class DomainRulesTest {
         assertEquals(FilterDecision.Block("user"), matcher.evaluate("example.com"))
         assertEquals(FilterDecision.Block("sub"), matcher.evaluate("www.example.com"))
     }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun throwsOnDuplicateRuleId() {
+        DomainRuleMatcher(listOf(
+            DomainRule("dup-id", "example.com", RuleSource.USER_BLOCK, RuleMatch.EXACT),
+            DomainRule("dup-id", "other.com", RuleSource.USER_ALLOW, RuleMatch.EXACT)
+        ))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun throwsOnBlankRuleId() {
+        DomainRuleMatcher(listOf(
+            DomainRule("  ", "example.com", RuleSource.USER_BLOCK, RuleMatch.EXACT)
+        ))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun throwsOnInvalidRuleDomain() {
+        DomainRuleMatcher(listOf(
+            DomainRule("rule-1", "bad..domain", RuleSource.USER_BLOCK, RuleMatch.EXACT)
+        ))
+    }
+
+    @Test
+    fun defaultsToAllowWhenNoRulesMatch() {
+        val matcher = DomainRuleMatcher(emptyList())
+        assertEquals(FilterDecision.Allow, matcher.evaluate("anything.org"))
+    }
 }
+
