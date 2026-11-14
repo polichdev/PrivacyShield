@@ -1,9 +1,8 @@
-package com.example.privacyshield.filtering
+﻿package com.example.privacyshield.filtering
 
 import java.net.IDN
 import java.util.Locale
 
-/** DNS hostnames are normalized to ASCII without a trailing root dot. */
 object DomainName {
     fun normalize(input: String): String? {
         if (input.isEmpty() || input != input.trim()) return null
@@ -30,21 +29,81 @@ sealed interface FilterDecision {
     data object InvalidDomain : FilterDecision
 }
 
-/** Immutable index; invalid or duplicate rule IDs fail at construction. */
 class DomainRuleMatcher(rules: List<DomainRule>) {
-    private val rules = rules.map { rule ->
+    private val normalizedRules = rules.map { rule ->
         require(rule.id.isNotBlank()) { "Rule ID must not be blank" }
         rule.copy(domain = requireNotNull(DomainName.normalize(rule.domain)) { "Invalid rule domain" })
     }.also { normalized ->
         require(normalized.map { it.id }.toSet().size == normalized.size) { "Duplicate rule ID" }
     }.sortedWith(compareBy<DomainRule>({ it.source.ordinal }, { it.id }))
 
+    private val ruleRanks = HashMap<String, Int>(normalizedRules.size * 4 / 3 + 1).apply {
+        normalizedRules.forEachIndexed { index, rule -> put(rule.id, index) }
+    }
+
+    private class TierMaps {
+        val exact = HashMap<String, DomainRule>()
+        val wildcard = HashMap<String, DomainRule>()
+    }
+
+    private val userAllowTier = TierMaps()
+    private val userBlockTier = TierMaps()
+    private val subscriptionTier = TierMaps()
+
+    init {
+        for (rule in normalizedRules) {
+            val tier = when (rule.source) {
+                RuleSource.USER_ALLOW -> userAllowTier
+                RuleSource.USER_BLOCK -> userBlockTier
+                RuleSource.SUBSCRIPTION -> subscriptionTier
+            }
+            if (rule.match == RuleMatch.EXACT) {
+                tier.exact.putIfAbsent(rule.domain, rule)
+            } else {
+                tier.wildcard.putIfAbsent(rule.domain, rule)
+            }
+        }
+    }
+
     fun evaluate(domain: String): FilterDecision {
         val normalized = DomainName.normalize(domain) ?: return FilterDecision.InvalidDomain
-        val match = rules.firstOrNull { rule ->
-            normalized == rule.domain ||
-                (rule.match == RuleMatch.INCLUDE_SUBDOMAINS && normalized.endsWith(".${rule.domain}"))
-        } ?: return FilterDecision.Allow
-        return if (match.source == RuleSource.USER_ALLOW) FilterDecision.Allow else FilterDecision.Block(match.id)
+
+        val allowMatch = findBestMatch(userAllowTier, normalized)
+        if (allowMatch != null) return FilterDecision.Allow
+
+        val blockMatch = findBestMatch(userBlockTier, normalized)
+        if (blockMatch != null) return FilterDecision.Block(blockMatch.id)
+
+        val subMatch = findBestMatch(subscriptionTier, normalized)
+        if (subMatch != null) return FilterDecision.Block(subMatch.id)
+
+        return FilterDecision.Allow
+    }
+
+    private fun findBestMatch(tier: TierMaps, domain: String): DomainRule? {
+        var bestRule: DomainRule? = null
+        var bestRank = Int.MAX_VALUE
+
+        fun consider(candidate: DomainRule?) {
+            if (candidate == null) return
+            val rank = ruleRanks[candidate.id] ?: Int.MAX_VALUE
+            if (rank < bestRank) {
+                bestRank = rank
+                bestRule = candidate
+            }
+        }
+
+        consider(tier.exact[domain])
+        consider(tier.wildcard[domain])
+
+        var dotIndex = domain.indexOf('.')
+        while (dotIndex != -1 && dotIndex < domain.length - 1) {
+            val parent = domain.substring(dotIndex + 1)
+            consider(tier.wildcard[parent])
+            dotIndex = domain.indexOf('.', dotIndex + 1)
+        }
+
+        return bestRule
     }
 }
+
