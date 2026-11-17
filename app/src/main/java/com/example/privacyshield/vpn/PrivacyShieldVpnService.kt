@@ -23,8 +23,10 @@ import com.example.privacyshield.data.SettingsRepository
 import com.example.privacyshield.data.StatisticsRepository
 import com.example.privacyshield.filtering.FilterDecision
 import com.example.privacyshield.network.DnsPacketProcessor
+import com.example.privacyshield.network.DohUpstreamDnsResolver
 import com.example.privacyshield.network.PacketProcessResult
 import com.example.privacyshield.network.UdpUpstreamDnsResolver
+import com.example.privacyshield.network.UpstreamDnsResolver
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -53,7 +55,7 @@ class PrivacyShieldVpnService : VpnService() {
     private var workerThread: Thread? = null
     private var workerThreadPool: ExecutorService? = null
     private var statsExecutor: ExecutorService? = null
-    private var upstreamResolver: UdpUpstreamDnsResolver? = null
+    private var upstreamResolver: UpstreamDnsResolver? = null
 
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -143,31 +145,24 @@ class PrivacyShieldVpnService : VpnService() {
             statsExecutor = statsPool
 
             val upstreamDns = settingsRepository.getUpstreamDns()
-            val resolver = UdpUpstreamDnsResolver(
+            val udpFallback = UdpUpstreamDnsResolver(
                 upstreamIp = upstreamDns,
                 socketProtector = { socket -> protect(socket) }
             )
+            val resolver = DohUpstreamDnsResolver(
+                upstreamIp = upstreamDns,
+                fallbackUdpResolver = udpFallback,
+                socketProtector = { socket -> protect(socket) }
+            )
             upstreamResolver = resolver
-
-            val recentEventTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
             val packetProcessor = DnsPacketProcessor(
                 ruleMatcherProvider = { ruleRepository.getCompiledMatcher() },
                 upstreamResolver = resolver,
                 onEvent = { domain, decision ->
                     val isBlocked = decision is FilterDecision.Block
-                    val now = System.currentTimeMillis()
-                    val last = recentEventTimes[domain] ?: 0L
-                    if (isBlocked || (now - last) > 5000L) {
-                        if (recentEventTimes.size > 2000) recentEventTimes.clear()
-                        recentEventTimes[domain] = now
-                        statsPool.execute {
-                            try {
-                                val ruleId = if (isBlocked) (decision as FilterDecision.Block).ruleId else null
-                                statisticsRepository.recordEvent(domain, isBlocked, ruleId)
-                            } catch (_: Exception) {}
-                        }
-                    }
+                    val ruleId = if (isBlocked) (decision as FilterDecision.Block).ruleId else null
+                    statisticsRepository.recordEvent(domain, isBlocked, ruleId)
                 }
             )
 
@@ -248,6 +243,10 @@ class PrivacyShieldVpnService : VpnService() {
         try {
             upstreamResolver?.close()
             upstreamResolver = null
+        } catch (_: Exception) {}
+
+        try {
+            statisticsRepository.flushPending()
         } catch (_: Exception) {}
 
         try {
