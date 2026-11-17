@@ -29,8 +29,9 @@ sealed interface PacketProcessResult {
     }
 }
 
-interface UpstreamDnsResolver {
+interface UpstreamDnsResolver : AutoCloseable {
     fun resolve(queryPayload: ByteArray): ByteArray?
+    override fun close() {}
 }
 
 class UdpUpstreamDnsResolver(
@@ -140,7 +141,7 @@ class UdpUpstreamDnsResolver(
         }
     }
 
-    fun close() {
+    override fun close() {
         for (s in allSockets) {
             try { s.close() } catch (_: Exception) {}
         }
