@@ -33,7 +33,8 @@ data class ParsedDnsDatagram(
     val destinationIp: ByteArray,
     val sourcePort: Int,
     val destinationPort: Int,
-    val dnsQuery: DnsQuery
+    val dnsQuery: DnsQuery,
+    val isIpv6: Boolean = false
 )
 
 object DnsPacketParser {
@@ -43,39 +44,74 @@ object DnsPacketParser {
 
         val versionAndIhl = packet[0].toInt() and 0xFF
         val version = versionAndIhl ushr 4
-        if (version != 4) return null
 
-        val ihl = (versionAndIhl and 0x0F) * 4
-        if (ihl < 20 || length < ihl + 8) return null
+        if (version == 4) {
+            val ihl = (versionAndIhl and 0x0F) * 4
+            if (ihl < 20 || length < ihl + 8) return null
 
-        val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return null 
+            val protocol = packet[9].toInt() and 0xFF
+            if (protocol != 17) return null 
 
-        val srcIp = packet.copyOfRange(12, 16)
-        val dstIp = packet.copyOfRange(16, 20)
+            val srcIp = packet.copyOfRange(12, 16)
+            val dstIp = packet.copyOfRange(16, 20)
 
-        val srcPort = ((packet[ihl].toInt() and 0xFF) shl 8) or (packet[ihl + 1].toInt() and 0xFF)
-        val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
+            val srcPort = ((packet[ihl].toInt() and 0xFF) shl 8) or (packet[ihl + 1].toInt() and 0xFF)
+            val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
 
-        if (dstPort != 53) return null 
+            if (dstPort != 53) return null 
 
-        val udpLength = ((packet[ihl + 4].toInt() and 0xFF) shl 8) or (packet[ihl + 5].toInt() and 0xFF)
-        if (udpLength < 8 || ihl + udpLength > length) return null
+            val udpLength = ((packet[ihl + 4].toInt() and 0xFF) shl 8) or (packet[ihl + 5].toInt() and 0xFF)
+            if (udpLength < 8 || ihl + udpLength > length) return null
 
-        val dnsOffset = ihl + 8
-        val dnsLength = udpLength - 8
-        if (dnsLength < 12) return null 
+            val dnsOffset = ihl + 8
+            val dnsLength = udpLength - 8
+            if (dnsLength < 12) return null 
 
-        val dnsPayload = packet.copyOfRange(dnsOffset, dnsOffset + dnsLength)
-        val dnsQuery = parseDnsQuery(dnsPayload) ?: return null
+            val dnsPayload = packet.copyOfRange(dnsOffset, dnsOffset + dnsLength)
+            val dnsQuery = parseDnsQuery(dnsPayload) ?: return null
 
-        return ParsedDnsDatagram(
-            sourceIp = srcIp,
-            destinationIp = dstIp,
-            sourcePort = srcPort,
-            destinationPort = dstPort,
-            dnsQuery = dnsQuery
-        )
+            return ParsedDnsDatagram(
+                sourceIp = srcIp,
+                destinationIp = dstIp,
+                sourcePort = srcPort,
+                destinationPort = dstPort,
+                dnsQuery = dnsQuery,
+                isIpv6 = false
+            )
+        } else if (version == 6) {
+            if (length < 48) return null
+            val nextHeader = packet[6].toInt() and 0xFF
+            if (nextHeader != 17) return null
+
+            val srcIp = packet.copyOfRange(8, 24)
+            val dstIp = packet.copyOfRange(24, 40)
+
+            val srcPort = ((packet[40].toInt() and 0xFF) shl 8) or (packet[41].toInt() and 0xFF)
+            val dstPort = ((packet[42].toInt() and 0xFF) shl 8) or (packet[43].toInt() and 0xFF)
+
+            if (dstPort != 53) return null
+
+            val udpLength = ((packet[44].toInt() and 0xFF) shl 8) or (packet[45].toInt() and 0xFF)
+            if (udpLength < 8 || 40 + udpLength > length) return null
+
+            val dnsOffset = 48
+            val dnsLength = udpLength - 8
+            if (dnsLength < 12) return null
+
+            val dnsPayload = packet.copyOfRange(dnsOffset, dnsOffset + dnsLength)
+            val dnsQuery = parseDnsQuery(dnsPayload) ?: return null
+
+            return ParsedDnsDatagram(
+                sourceIp = srcIp,
+                destinationIp = dstIp,
+                sourcePort = srcPort,
+                destinationPort = dstPort,
+                dnsQuery = dnsQuery,
+                isIpv6 = true
+            )
+        }
+
+        return null
     }
 
     fun parseDnsQuery(payload: ByteArray): DnsQuery? {
@@ -152,26 +188,46 @@ object DnsPacketSynthesizer {
         ttlSeconds: Int = 300
     ): ByteArray {
         val dnsResponsePayload = createBlockDnsPayload(parsed.dnsQuery, ttlSeconds)
-        return wrapInIpv4Udp(
-            sourceIp = parsed.destinationIp, 
-            destinationIp = parsed.sourceIp,
-            sourcePort = parsed.destinationPort,
-            destinationPort = parsed.sourcePort,
-            payload = dnsResponsePayload
-        )
+        return if (parsed.isIpv6) {
+            wrapInIpv6Udp(
+                sourceIp = parsed.destinationIp,
+                destinationIp = parsed.sourceIp,
+                sourcePort = parsed.destinationPort,
+                destinationPort = parsed.sourcePort,
+                payload = dnsResponsePayload
+            )
+        } else {
+            wrapInIpv4Udp(
+                sourceIp = parsed.destinationIp,
+                destinationIp = parsed.sourceIp,
+                sourcePort = parsed.destinationPort,
+                destinationPort = parsed.sourcePort,
+                payload = dnsResponsePayload
+            )
+        }
     }
 
     fun wrapUpstreamResponse(
         parsed: ParsedDnsDatagram,
         upstreamDnsPayload: ByteArray
     ): ByteArray {
-        return wrapInIpv4Udp(
-            sourceIp = parsed.destinationIp,
-            destinationIp = parsed.sourceIp,
-            sourcePort = parsed.destinationPort,
-            destinationPort = parsed.sourcePort,
-            payload = upstreamDnsPayload
-        )
+        return if (parsed.isIpv6) {
+            wrapInIpv6Udp(
+                sourceIp = parsed.destinationIp,
+                destinationIp = parsed.sourceIp,
+                sourcePort = parsed.destinationPort,
+                destinationPort = parsed.sourcePort,
+                payload = upstreamDnsPayload
+            )
+        } else {
+            wrapInIpv4Udp(
+                sourceIp = parsed.destinationIp,
+                destinationIp = parsed.sourceIp,
+                sourcePort = parsed.destinationPort,
+                destinationPort = parsed.sourcePort,
+                payload = upstreamDnsPayload
+            )
+        }
     }
 
     fun createBlockDnsPayload(query: DnsQuery, ttlSeconds: Int = 300): ByteArray {
@@ -258,6 +314,37 @@ object DnsPacketSynthesizer {
         packet.putShort(destinationPort.toShort())
         packet.putShort(udpLength.toShort())
         packet.putShort(0.toShort()) 
+        packet.put(payload)
+
+        return packet.array()
+    }
+
+    fun wrapInIpv6Udp(
+        sourceIp: ByteArray,
+        destinationIp: ByteArray,
+        sourcePort: Int,
+        destinationPort: Int,
+        payload: ByteArray
+    ): ByteArray {
+        val ipHeaderLength = 40
+        val udpHeaderLength = 8
+        val udpLength = udpHeaderLength + payload.size
+        val totalLength = ipHeaderLength + udpLength
+
+        val packet = ByteBuffer.allocate(totalLength)
+        packet.put(0x60.toByte())
+        packet.put(0x00.toByte())
+        packet.putShort(0x0000.toShort())
+        packet.putShort(udpLength.toShort())
+        packet.put(17.toByte())
+        packet.put(64.toByte())
+        packet.put(sourceIp)
+        packet.put(destinationIp)
+
+        packet.putShort(sourcePort.toShort())
+        packet.putShort(destinationPort.toShort())
+        packet.putShort(udpLength.toShort())
+        packet.putShort(0.toShort())
         packet.put(payload)
 
         return packet.array()

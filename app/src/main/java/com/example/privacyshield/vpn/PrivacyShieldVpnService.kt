@@ -116,6 +116,30 @@ class PrivacyShieldVpnService : VpnService() {
                 .addDnsServer(DNS_SERVER_ADDRESS)
                 .addRoute(VPN_ROUTE, 32)
 
+            val interceptedIpv4Dns = listOf(
+                "8.8.8.8", "8.8.4.4",
+                "1.1.1.1", "1.0.0.1",
+                "9.9.9.9", "149.112.112.112",
+                "208.67.222.222", "208.67.220.220"
+            )
+            for (dnsIp in interceptedIpv4Dns) {
+                try { builder.addRoute(dnsIp, 32) } catch (_: Exception) {}
+            }
+
+            try {
+                builder.addAddress("fd00:1:fd00:1::2", 128)
+                builder.addDnsServer("fd00:1:fd00:1::1")
+                builder.addRoute("fd00:1:fd00:1::1", 128)
+                val interceptedIpv6Dns = listOf(
+                    "2001:4860:4860::8888", "2001:4860:4860::8844",
+                    "2606:4700:4700::1111", "2606:4700:4700::1001",
+                    "2620:fe::fe", "2620:fe::9"
+                )
+                for (dnsIpv6 in interceptedIpv6Dns) {
+                    try { builder.addRoute(dnsIpv6, 128) } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+
             val filteredPackages = appPolicyRepository.getFilteredPackages()
             if (filteredPackages.isNotEmpty()) {
                 for (pkg in filteredPackages) {

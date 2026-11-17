@@ -31,6 +31,8 @@ class RuleRepository(private val dbHelper: DatabaseHelper) {
         val PRESET_BLOCKLISTS = listOf(
             BlocklistPreset("StevenBlack Unified", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"),
             BlocklistPreset("AdGuard DNS Filter", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"),
+            BlocklistPreset("AdGuard Popups / Tracking", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_3.txt"),
+            BlocklistPreset("AdAway Default Blocklist", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt"),
             BlocklistPreset("Peter Lowe Adservers", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext"),
             BlocklistPreset("OISD Basic", "https://small.oisd.nl")
         )

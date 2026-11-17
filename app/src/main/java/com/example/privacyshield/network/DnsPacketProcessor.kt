@@ -201,10 +201,18 @@ class DnsPacketProcessor(
             "connectivitycheck.android.com",
             "clients3.google.com",
             "play.googleapis.com",
-            "dns.google",
             "android.clients.google.com",
             "play-lh.googleusercontent.com",
             "play.google.com"
+        )
+
+        private val DOH_BOOTSTRAP_AND_CANARY_DOMAINS = setOf(
+            "dns.google",
+            "dns.google.com",
+            "cloudflare-dns.com",
+            "one.one.one.one",
+            "dns.quad9.net",
+            "use-application-dns.net"
         )
     }
 
@@ -226,10 +234,16 @@ class DnsPacketProcessor(
         val domain = primaryQuestion.domain
         val qType = primaryQuestion.qType
         val matcher = ruleMatcherProvider()
-        val decision = if (domain in ESSENTIAL_SYSTEM_DOMAINS || domain.endsWith(".gvt1.com")) {
-            FilterDecision.Allow
-        } else {
-            matcher.evaluate(domain)
+        val decision = when {
+            domain in DOH_BOOTSTRAP_AND_CANARY_DOMAINS -> {
+                FilterDecision.Block("doh-canary-block")
+            }
+            domain in ESSENTIAL_SYSTEM_DOMAINS || domain.endsWith(".gvt1.com") -> {
+                FilterDecision.Allow
+            }
+            else -> {
+                matcher.evaluate(domain)
+            }
         }
 
         onEvent(domain, decision)

@@ -135,5 +135,76 @@ class DnsPacketProcessorTest {
         assertEquals(FilterDecision.Allow, (result as PacketProcessResult.Handled).decision)
         assertEquals(1, fakeResolver.callCount)
     }
+
+    @Test
+    fun blocksDohBootstrapDomainsToPreventBypass() {
+        val matcher = DomainRuleMatcher(emptyList())
+        val fakeResolver = FakeUpstreamResolver()
+
+        val processor = DnsPacketProcessor(
+            ruleMatcherProvider = { matcher },
+            upstreamResolver = fakeResolver
+        )
+
+        val packetGoogle = buildUdpDnsPacket("dns.google")
+        val resultGoogle = processor.processPacket(packetGoogle, packetGoogle.size)
+        assertTrue(resultGoogle is PacketProcessResult.Handled)
+        assertEquals(FilterDecision.Block("doh-canary-block"), (resultGoogle as PacketProcessResult.Handled).decision)
+        assertEquals(0, fakeResolver.callCount)
+
+        val packetFirefox = buildUdpDnsPacket("use-application-dns.net")
+        val resultFirefox = processor.processPacket(packetFirefox, packetFirefox.size)
+        assertTrue(resultFirefox is PacketProcessResult.Handled)
+        assertEquals(FilterDecision.Block("doh-canary-block"), (resultFirefox as PacketProcessResult.Handled).decision)
+        assertEquals(0, fakeResolver.callCount)
+    }
+
+    @Test
+    fun handlesIpv6DnsPackets() {
+        val rules = listOf(
+            DomainRule("rule-1", "adserver.com", RuleSource.USER_BLOCK, RuleMatch.EXACT)
+        )
+        val matcher = DomainRuleMatcher(rules)
+        val fakeResolver = FakeUpstreamResolver()
+
+        val processor = DnsPacketProcessor(
+            ruleMatcherProvider = { matcher },
+            upstreamResolver = fakeResolver
+        )
+
+        val baos = ByteArrayOutputStream()
+        val dos = DataOutputStream(baos)
+        dos.writeShort(0x5678)
+        dos.writeShort(0x0100)
+        dos.writeShort(1)
+        dos.writeShort(0)
+        dos.writeShort(0)
+        dos.writeShort(0)
+
+        for (part in "adserver.com".split('.')) {
+            val bytes = part.toByteArray(Charsets.US_ASCII)
+            dos.writeByte(bytes.size)
+            dos.write(bytes)
+        }
+        dos.writeByte(0)
+        dos.writeShort(28)
+        dos.writeShort(1)
+        dos.flush()
+
+        val dnsPayload = baos.toByteArray()
+        val ipv6Packet = DnsPacketSynthesizer.wrapInIpv6Udp(
+            sourceIp = ByteArray(16) { 0xfe.toByte() },
+            destinationIp = ByteArray(16) { 0xfd.toByte() },
+            sourcePort = 54321,
+            destinationPort = 53,
+            payload = dnsPayload
+        )
+
+        val result = processor.processPacket(ipv6Packet, ipv6Packet.size)
+        assertTrue(result is PacketProcessResult.Handled)
+        val handled = result as PacketProcessResult.Handled
+        assertEquals(FilterDecision.Block("rule-1"), handled.decision)
+        assertEquals(0, fakeResolver.callCount)
+    }
 }
 
