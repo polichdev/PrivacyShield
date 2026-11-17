@@ -52,7 +52,7 @@ class DatabaseHelper(private val context: Context) : SQLiteOpenHelper(context, D
 
     companion object {
         const val DATABASE_NAME = "privacy_shield.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 5
 
         @Volatile
         private var instance: DatabaseHelper? = null
@@ -367,35 +367,41 @@ class DatabaseHelper(private val context: Context) : SQLiteOpenHelper(context, D
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 4) {
+        if (oldVersion < 5) {
             seedDefaultBlocklists(db)
             seedStarterCustomRules(db)
             updateSubscriptionStarterRules(db)
-            setSettingsValue(db, "seeded_starter_domains_version", "4")
+            setSettingsValue(db, "seeded_starter_domains_version", "5")
         }
     }
 
     fun seedStarterCustomRules(db: SQLiteDatabase) {
         val now = System.currentTimeMillis()
-        val stmt = db.compileStatement("INSERT OR IGNORE INTO custom_rules (id, domain, source, match_type, created_at) VALUES (?, ?, ?, ?, ?)")
-        for (domain in DEFAULT_STARTER_DOMAINS) {
-            stmt.bindString(1, "starter-block:$domain")
-            stmt.bindString(2, domain)
-            stmt.bindString(3, RuleSource.USER_BLOCK.name)
-            stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
-            stmt.bindLong(5, now)
-            stmt.executeInsert()
-            stmt.clearBindings()
+        db.beginTransaction()
+        try {
+            val stmt = db.compileStatement("INSERT OR IGNORE INTO custom_rules (id, domain, source, match_type, created_at) VALUES (?, ?, ?, ?, ?)")
+            for (domain in DEFAULT_STARTER_DOMAINS) {
+                stmt.bindString(1, "starter-block:$domain")
+                stmt.bindString(2, domain)
+                stmt.bindString(3, RuleSource.USER_BLOCK.name)
+                stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
+                stmt.bindLong(5, now)
+                stmt.executeInsert()
+                stmt.clearBindings()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 
     private fun ensureStarterCustomRulesSeeded(db: SQLiteDatabase) {
         val currentSeededVersion = getSettingsValue(db, "seeded_starter_domains_version")?.toIntOrNull() ?: 0
-        if (currentSeededVersion < 4) {
+        if (currentSeededVersion < 5) {
             seedDefaultBlocklists(db)
             seedStarterCustomRules(db)
             updateSubscriptionStarterRules(db)
-            setSettingsValue(db, "seeded_starter_domains_version", "4")
+            setSettingsValue(db, "seeded_starter_domains_version", "5")
         }
     }
 
@@ -417,40 +423,68 @@ class DatabaseHelper(private val context: Context) : SQLiteOpenHelper(context, D
         var loadedCount = 0
 
         val hasAsset = try {
-            context.assets.open("starter_hosts.txt.gz").use { inputStream ->
-                GZIPInputStream(inputStream).use { gz ->
-                    BufferedReader(InputStreamReader(gz, Charsets.UTF_8)).useLines { lines ->
-                        val stmt = db.compileStatement("INSERT OR IGNORE INTO subscription_rules (id, blocklist_id, domain, match_type) VALUES (?, ?, ?, ?)")
-                        for (line in lines) {
-                            val domain = line.trim()
-                            if (domain.isNotEmpty()) {
-                                stmt.bindString(1, "$blocklistId:$domain")
-                                stmt.bindString(2, blocklistId)
-                                stmt.bindString(3, domain)
-                                stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
-                                stmt.executeInsert()
-                                stmt.clearBindings()
-                                loadedCount++
-                            }
-                        }
+            val assetStream = try {
+                GZIPInputStream(context.assets.open("starter_hosts.bin"))
+            } catch (_: Exception) {
+                try {
+                    context.assets.open("starter_hosts.txt")
+                } catch (_: Exception) {
+                    try {
+                        GZIPInputStream(context.assets.open("starter_hosts.txt.gz"))
+                    } catch (_: Exception) {
+                        null
                     }
                 }
             }
-            true
+
+            if (assetStream != null) {
+                assetStream.use { stream ->
+                    BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).useLines { lines ->
+                        db.beginTransaction()
+                        try {
+                            val stmt = db.compileStatement("INSERT OR IGNORE INTO subscription_rules (id, blocklist_id, domain, match_type) VALUES (?, ?, ?, ?)")
+                            for (line in lines) {
+                                val domain = line.trim()
+                                if (domain.isNotEmpty()) {
+                                    stmt.bindString(1, "$blocklistId:$domain")
+                                    stmt.bindString(2, blocklistId)
+                                    stmt.bindString(3, domain)
+                                    stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
+                                    stmt.executeInsert()
+                                    stmt.clearBindings()
+                                    loadedCount++
+                                }
+                            }
+                            db.setTransactionSuccessful()
+                        } finally {
+                            db.endTransaction()
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            }
         } catch (_: Exception) {
             false
         }
 
         if (!hasAsset || loadedCount == 0) {
-            val stmt = db.compileStatement("INSERT OR IGNORE INTO subscription_rules (id, blocklist_id, domain, match_type) VALUES (?, ?, ?, ?)")
-            for (domain in DEFAULT_STARTER_DOMAINS) {
-                stmt.bindString(1, "$blocklistId:$domain")
-                stmt.bindString(2, blocklistId)
-                stmt.bindString(3, domain)
-                stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
-                stmt.executeInsert()
-                stmt.clearBindings()
-                loadedCount++
+            db.beginTransaction()
+            try {
+                val stmt = db.compileStatement("INSERT OR IGNORE INTO subscription_rules (id, blocklist_id, domain, match_type) VALUES (?, ?, ?, ?)")
+                for (domain in DEFAULT_STARTER_DOMAINS) {
+                    stmt.bindString(1, "$blocklistId:$domain")
+                    stmt.bindString(2, blocklistId)
+                    stmt.bindString(3, domain)
+                    stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
+                    stmt.executeInsert()
+                    stmt.clearBindings()
+                    loadedCount++
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
             }
         }
 
@@ -497,7 +531,7 @@ class DatabaseHelper(private val context: Context) : SQLiteOpenHelper(context, D
                 put("rule_count", list.ruleCount)
                 put("last_updated", list.lastUpdated)
             }
-            db.insertWithOnConflict("blocklists", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+            db.insertWithOnConflict("blocklists", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
         }
 
         updateSubscriptionStarterRules(db)
