@@ -29,81 +29,97 @@ sealed interface FilterDecision {
     data object InvalidDomain : FilterDecision
 }
 
-class DomainRuleMatcher(rules: List<DomainRule>) {
-    private val normalizedRules = rules.map { rule ->
-        require(rule.id.isNotBlank()) { "Rule ID must not be blank" }
-        rule.copy(domain = requireNotNull(DomainName.normalize(rule.domain)) { "Invalid rule domain" })
-    }.also { normalized ->
-        require(normalized.map { it.id }.toSet().size == normalized.size) { "Duplicate rule ID" }
-    }.sortedWith(compareBy<DomainRule>({ it.source.ordinal }, { it.id }))
-
-    private val ruleRanks = HashMap<String, Int>(normalizedRules.size * 4 / 3 + 1).apply {
-        normalizedRules.forEachIndexed { index, rule -> put(rule.id, index) }
+class CompactDomainTrie {
+    private class Node {
+        val children = HashMap<String, Node>()
+        var exactRule: DomainRule? = null
+        var wildcardRule: DomainRule? = null
+        var exactRank: Int = Int.MAX_VALUE
+        var wildcardRank: Int = Int.MAX_VALUE
     }
 
-    private class TierMaps {
-        val exact = HashMap<String, DomainRule>()
-        val wildcard = HashMap<String, DomainRule>()
-    }
+    private val root = Node()
 
-    private val userAllowTier = TierMaps()
-    private val userBlockTier = TierMaps()
-    private val subscriptionTier = TierMaps()
-
-    init {
-        for (rule in normalizedRules) {
-            val tier = when (rule.source) {
-                RuleSource.USER_ALLOW -> userAllowTier
-                RuleSource.USER_BLOCK -> userBlockTier
-                RuleSource.SUBSCRIPTION -> subscriptionTier
+    fun insert(labelsReversed: List<String>, rule: DomainRule, rank: Int) {
+        var current = root
+        for (label in labelsReversed) {
+            current = current.children.getOrPut(label) { Node() }
+        }
+        if (rule.match == RuleMatch.EXACT) {
+            if (rank < current.exactRank) {
+                current.exactRule = rule
+                current.exactRank = rank
             }
-            if (rule.match == RuleMatch.EXACT) {
-                tier.exact.putIfAbsent(rule.domain, rule)
-            } else {
-                tier.wildcard.putIfAbsent(rule.domain, rule)
+        } else {
+            if (rank < current.wildcardRank) {
+                current.wildcardRule = rule
+                current.wildcardRank = rank
             }
         }
     }
 
-    fun evaluate(domain: String): FilterDecision {
-        val normalized = DomainName.normalize(domain) ?: return FilterDecision.InvalidDomain
-
-        val allowMatch = findBestMatch(userAllowTier, normalized)
-        if (allowMatch != null) return FilterDecision.Allow
-
-        val blockMatch = findBestMatch(userBlockTier, normalized)
-        if (blockMatch != null) return FilterDecision.Block(blockMatch.id)
-
-        val subMatch = findBestMatch(subscriptionTier, normalized)
-        if (subMatch != null) return FilterDecision.Block(subMatch.id)
-
-        return FilterDecision.Allow
-    }
-
-    private fun findBestMatch(tier: TierMaps, domain: String): DomainRule? {
+    fun findBestMatch(labelsReversed: List<String>): DomainRule? {
         var bestRule: DomainRule? = null
         var bestRank = Int.MAX_VALUE
+        var current = root
 
-        fun consider(candidate: DomainRule?) {
-            if (candidate == null) return
-            val rank = ruleRanks[candidate.id] ?: Int.MAX_VALUE
-            if (rank < bestRank) {
-                bestRank = rank
-                bestRule = candidate
+        for (i in labelsReversed.indices) {
+            val label = labelsReversed[i]
+            val next = current.children[label] ?: break
+            current = next
+
+            val isLastLabel = (i == labelsReversed.size - 1)
+            if (isLastLabel) {
+                if (current.exactRule != null && current.exactRank < bestRank) {
+                    bestRank = current.exactRank
+                    bestRule = current.exactRule
+                }
             }
-        }
-
-        consider(tier.exact[domain])
-        consider(tier.wildcard[domain])
-
-        var dotIndex = domain.indexOf('.')
-        while (dotIndex != -1 && dotIndex < domain.length - 1) {
-            val parent = domain.substring(dotIndex + 1)
-            consider(tier.wildcard[parent])
-            dotIndex = domain.indexOf('.', dotIndex + 1)
+            if (current.wildcardRule != null && current.wildcardRank < bestRank) {
+                bestRank = current.wildcardRank
+                bestRule = current.wildcardRule
+            }
         }
 
         return bestRule
     }
 }
 
+class DomainRuleMatcher(rules: List<DomainRule>) {
+    private val userAllowTrie = CompactDomainTrie()
+    private val userBlockTrie = CompactDomainTrie()
+    private val subscriptionTrie = CompactDomainTrie()
+
+    init {
+        val seenIds = HashSet<String>(rules.size)
+        for (i in rules.indices) {
+            val rule = rules[i]
+            require(rule.id.isNotBlank()) { "Rule ID must not be blank" }
+            require(seenIds.add(rule.id)) { "Duplicate rule ID" }
+            val normalized = requireNotNull(DomainName.normalize(rule.domain)) { "Invalid rule domain" }
+            val trie = when (rule.source) {
+                RuleSource.USER_ALLOW -> userAllowTrie
+                RuleSource.USER_BLOCK -> userBlockTrie
+                RuleSource.SUBSCRIPTION -> subscriptionTrie
+            }
+            val labelsReversed = normalized.split('.').reversed()
+            trie.insert(labelsReversed, if (normalized == rule.domain) rule else rule.copy(domain = normalized), i)
+        }
+    }
+
+    fun evaluate(domain: String): FilterDecision {
+        val normalized = DomainName.normalize(domain) ?: return FilterDecision.InvalidDomain
+        val labelsReversed = normalized.split('.').reversed()
+
+        val allowMatch = userAllowTrie.findBestMatch(labelsReversed)
+        if (allowMatch != null) return FilterDecision.Allow
+
+        val blockMatch = userBlockTrie.findBestMatch(labelsReversed)
+        if (blockMatch != null) return FilterDecision.Block(blockMatch.id)
+
+        val subMatch = subscriptionTrie.findBestMatch(labelsReversed)
+        if (subMatch != null) return FilterDecision.Block(subMatch.id)
+
+        return FilterDecision.Allow
+    }
+}

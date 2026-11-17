@@ -64,5 +64,20 @@ class DomainRulesTest {
         val matcher = DomainRuleMatcher(emptyList())
         assertEquals(FilterDecision.Allow, matcher.evaluate("anything.org"))
     }
-}
 
+    @Test
+    fun compactTrieMatchesSubdomainsAndAdultAdNetworks() {
+        val matcher = DomainRuleMatcher(listOf(
+            DomainRule("tj-1", "trafficjunky.net", RuleSource.USER_BLOCK, RuleMatch.INCLUDE_SUBDOMAINS),
+            DomainRule("exo-1", "exoclick.com", RuleSource.USER_BLOCK, RuleMatch.INCLUDE_SUBDOMAINS),
+            DomainRule("allow-safe", "safe.trafficjunky.net", RuleSource.USER_ALLOW, RuleMatch.EXACT)
+        ))
+
+        assertEquals(FilterDecision.Block("tj-1"), matcher.evaluate("trafficjunky.net"))
+        assertEquals(FilterDecision.Block("tj-1"), matcher.evaluate("delivery.trafficjunky.net"))
+        assertEquals(FilterDecision.Block("tj-1"), matcher.evaluate("ads.sub.trafficjunky.net"))
+        assertEquals(FilterDecision.Block("exo-1"), matcher.evaluate("ads.exoclick.com"))
+        assertEquals(FilterDecision.Allow, matcher.evaluate("safe.trafficjunky.net"))
+        assertEquals(FilterDecision.Allow, matcher.evaluate("pornhub.com"))
+    }
+}
