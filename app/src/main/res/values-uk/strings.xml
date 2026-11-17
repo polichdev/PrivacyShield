@@ -90,6 +90,7 @@
     <string name="player_queue">Черга відтворення (%1$d)</string>
 
     <string name="filter_add_blocklist_title">Додати список блокування</string>
+    <string name="filter_popular_presets">Рекомендовані джерела:</string>
     <string name="filter_blocklist_url_label">URL списку (hosts / txt)</string>
     <string name="filter_error_invalid_url">Недійсний URL або помилка додавання</string>
     <string name="filter_imported_count">Імпортовано %1$d правил</string>

@@ -90,6 +90,7 @@
     <string name="player_queue">Playback queue (%1$d)</string>
 
     <string name="filter_add_blocklist_title">Add Blocklist</string>
+    <string name="filter_popular_presets">Recommended sources:</string>
     <string name="filter_blocklist_url_label">URL (hosts / txt)</string>
     <string name="filter_error_invalid_url">Invalid URL or error adding blocklist</string>
     <string name="filter_imported_count">Imported %1$d rules</string>

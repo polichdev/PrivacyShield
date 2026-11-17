@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.privacyshield.R
+import com.example.privacyshield.data.RuleRepository
 import com.example.privacyshield.filtering.RuleSource
 import com.example.privacyshield.ui.theme.OrangePrimary
 import com.example.privacyshield.ui.theme.StatusGreen
@@ -125,6 +126,45 @@ fun FiltersScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Text(
+                        stringResource(R.string.filter_popular_presets),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFA2A2B0)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        RuleRepository.PRESET_BLOCKLISTS.take(2).forEach { preset ->
+                            OutlinedButton(
+                                onClick = {
+                                    newBlocklistName = preset.name
+                                    newBlocklistUrl = preset.url
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(preset.name.substringBefore(" "), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        RuleRepository.PRESET_BLOCKLISTS.drop(2).take(2).forEach { preset ->
+                            OutlinedButton(
+                                onClick = {
+                                    newBlocklistName = preset.name
+                                    newBlocklistUrl = preset.url
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(preset.name.substringBefore(" "), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {

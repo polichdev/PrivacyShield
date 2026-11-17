@@ -12,8 +12,37 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+data class BlocklistPreset(
+    val name: String,
+    val url: String
+)
 
 class RuleRepository(private val dbHelper: DatabaseHelper) {
+
+    companion object {
+        val PRESET_BLOCKLISTS = listOf(
+            BlocklistPreset("StevenBlack Unified", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"),
+            BlocklistPreset("AdGuard DNS Filter", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"),
+            BlocklistPreset("Peter Lowe Adservers", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext"),
+            BlocklistPreset("OISD Basic", "https://small.oisd.nl")
+        )
+
+        fun isValidBlocklistUrl(url: String): Boolean {
+            val trimmed = url.trim()
+            if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false
+            return try {
+                val parsed = java.net.URL(trimmed)
+                parsed.host.isNotBlank() && !parsed.host.contains(" ")
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
 
     private val _rulesVersion = MutableStateFlow(0)
     val rulesVersion: StateFlow<Int> = _rulesVersion.asStateFlow()
@@ -114,19 +143,6 @@ class RuleRepository(private val dbHelper: DatabaseHelper) {
         return false
     }
 
-    companion object {
-        fun isValidBlocklistUrl(url: String): Boolean {
-            val trimmed = url.trim()
-            if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false
-            return try {
-                val parsed = java.net.URL(trimmed)
-                parsed.host.isNotBlank() && !parsed.host.contains(" ")
-            } catch (_: Exception) {
-                false
-            }
-        }
-    }
-
     @Synchronized
     fun addBlocklist(name: String, url: String): String? {
         val trimmedName = name.trim()
@@ -175,17 +191,16 @@ class RuleRepository(private val dbHelper: DatabaseHelper) {
         val db = dbHelper.writableDatabase
         db.beginTransaction()
         try {
-
             db.delete("subscription_rules", "blocklist_id = ?", arrayOf(id))
 
+            val stmt = db.compileStatement("INSERT OR IGNORE INTO subscription_rules (id, blocklist_id, domain, match_type) VALUES (?, ?, ?, ?)")
             for (domain in domains) {
-                val cvRule = ContentValues().apply {
-                    put("id", "$id:$domain")
-                    put("blocklist_id", id)
-                    put("domain", domain)
-                    put("match_type", RuleMatch.INCLUDE_SUBDOMAINS.name)
-                }
-                db.insert("subscription_rules", null, cvRule)
+                stmt.bindString(1, "$id:$domain")
+                stmt.bindString(2, id)
+                stmt.bindString(3, domain)
+                stmt.bindString(4, RuleMatch.INCLUDE_SUBDOMAINS.name)
+                stmt.executeInsert()
+                stmt.clearBindings()
             }
 
             val cvList = ContentValues().apply {
@@ -205,18 +220,39 @@ class RuleRepository(private val dbHelper: DatabaseHelper) {
     suspend fun downloadAndRefreshBlocklist(id: String): Boolean {
         val blocklist = getBlocklists().firstOrNull { it.id == id } ?: return false
         return try {
-            val url = java.net.URL(blocklist.url)
-            val connection = url.openConnection() as java.net.HttpURLConnection
-            connection.connectTimeout = 8000
-            connection.readTimeout = 10000
-            connection.requestMethod = "GET"
+            var currentUrl = blocklist.url
+            var redirects = 0
+            while (true) {
+                val url = java.net.URL(currentUrl)
+                val connection = url.openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 15000
+                connection.readTimeout = 30000
+                connection.instanceFollowRedirects = true
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:120.0)")
 
-            if (connection.responseCode in 200..299) {
-                val domains = com.example.privacyshield.filtering.HostsParser.parse(connection.inputStream)
-                if (domains.isNotEmpty()) {
-                    updateBlocklistRules(id, domains)
-                } else false
-            } else false
+                val responseCode = connection.responseCode
+                if (responseCode in 300..399 && redirects < 5) {
+                    val location = connection.getHeaderField("Location") ?: break
+                    currentUrl = if (location.startsWith("http://") || location.startsWith("https://")) {
+                        location
+                    } else {
+                        java.net.URL(url, location).toString()
+                    }
+                    redirects++
+                    continue
+                }
+
+                return if (responseCode in 200..299) {
+                    val domains = com.example.privacyshield.filtering.HostsParser.parse(connection.inputStream)
+                    if (domains.isNotEmpty()) {
+                        updateBlocklistRules(id, domains)
+                    } else false
+                } else {
+                    false
+                }
+            }
+            false
         } catch (_: Exception) {
             false
         }
@@ -378,8 +414,29 @@ class AppPolicyRepository(private val dbHelper: DatabaseHelper) {
 
 class StatisticsRepository(private val dbHelper: DatabaseHelper) {
 
+    private data class QueuedFilterEvent(
+        val timestamp: Long,
+        val domain: String,
+        val isBlocked: Boolean,
+        val ruleId: String?
+    )
+
+    private val eventQueue = ConcurrentLinkedQueue<QueuedFilterEvent>()
+    private val pendingCount = AtomicInteger(0)
+    private val flushLock = Any()
+
     private val _statsState = MutableStateFlow(getStats())
     val statsState: StateFlow<ProtectionStats> = _statsState.asStateFlow()
+
+    private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "PrivacyShield-StatsBatcher").apply { isDaemon = true }
+    }
+
+    init {
+        scheduler.scheduleWithFixedDelay({
+            flushPending()
+        }, 5, 5, TimeUnit.SECONDS)
+    }
 
     @Synchronized
     fun getStats(): ProtectionStats {
@@ -397,39 +454,7 @@ class StatisticsRepository(private val dbHelper: DatabaseHelper) {
         return ProtectionStats(0, 0, 0)
     }
 
-    private var eventCount = 0
-
-    @Synchronized
     fun recordEvent(domain: String, isBlocked: Boolean, ruleId: String?) {
-        val db = dbHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            val cvEvent = ContentValues().apply {
-                put("timestamp", System.currentTimeMillis())
-                put("domain", domain)
-                put("is_blocked", if (isBlocked) 1 else 0)
-                put("rule_id", ruleId)
-            }
-            db.insert("filter_events", null, cvEvent)
-
-            val updateSql = if (isBlocked) {
-                "UPDATE statistics SET total_queries = total_queries + 1, blocked_queries = blocked_queries + 1 WHERE id = 1"
-            } else {
-                "UPDATE statistics SET total_queries = total_queries + 1, allowed_queries = allowed_queries + 1 WHERE id = 1"
-            }
-            db.execSQL(updateSql)
-
-            eventCount++
-
-            if (eventCount % 50 == 0) {
-                db.execSQL("DELETE FROM filter_events WHERE id NOT IN (SELECT id FROM filter_events ORDER BY id DESC LIMIT 200)")
-            }
-
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-
         _statsState.update { current ->
             ProtectionStats(
                 totalQueries = current.totalQueries + 1,
@@ -438,10 +463,59 @@ class StatisticsRepository(private val dbHelper: DatabaseHelper) {
                 uptimeMillis = current.uptimeMillis
             )
         }
+
+        eventQueue.add(QueuedFilterEvent(System.currentTimeMillis(), domain, isBlocked, ruleId))
+        val count = pendingCount.incrementAndGet()
+        if (count >= 25) {
+            scheduler.execute { flushPending() }
+        }
     }
 
-    @Synchronized
+    fun flushPending() {
+        synchronized(flushLock) {
+            val batch = mutableListOf<QueuedFilterEvent>()
+            while (true) {
+                val item = eventQueue.poll() ?: break
+                batch.add(item)
+            }
+            if (batch.isEmpty()) return
+            pendingCount.addAndGet(-batch.size)
+
+            val db = dbHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                var blockedCount = 0L
+                var allowedCount = 0L
+                for (event in batch) {
+                    val cv = ContentValues().apply {
+                        put("timestamp", event.timestamp)
+                        put("domain", event.domain)
+                        put("is_blocked", if (event.isBlocked) 1 else 0)
+                        put("rule_id", event.ruleId)
+                    }
+                    db.insert("filter_events", null, cv)
+                    if (event.isBlocked) blockedCount++ else allowedCount++
+                }
+
+                val total = blockedCount + allowedCount
+                if (total > 0) {
+                    db.execSQL(
+                        "UPDATE statistics SET total_queries = total_queries + ?, blocked_queries = blocked_queries + ?, allowed_queries = allowed_queries + ? WHERE id = 1",
+                        arrayOf(total, blockedCount, allowedCount)
+                    )
+                }
+
+                db.execSQL("DELETE FROM filter_events WHERE id NOT IN (SELECT id FROM filter_events ORDER BY id DESC LIMIT 200)")
+                db.setTransactionSuccessful()
+            } catch (_: Exception) {
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
     fun getRecentEvents(limit: Int = 50): List<FilterEvent> {
+        flushPending()
         val events = mutableListOf<FilterEvent>()
         val db = dbHelper.readableDatabase
         val cursor = db.query("filter_events", arrayOf("id", "timestamp", "domain", "is_blocked", "rule_id"), null, null, null, null, "id DESC", limit.toString())
@@ -461,8 +535,8 @@ class StatisticsRepository(private val dbHelper: DatabaseHelper) {
         return events
     }
 
-    @Synchronized
     fun getTopBlockedDomains(limit: Int = 10): List<Pair<String, Int>> {
+        flushPending()
         val list = mutableListOf<Pair<String, Int>>()
         val db = dbHelper.readableDatabase
         val query = """
@@ -482,18 +556,21 @@ class StatisticsRepository(private val dbHelper: DatabaseHelper) {
         return list
     }
 
-    @Synchronized
     fun resetStats() {
-        val db = dbHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            db.execSQL("UPDATE statistics SET total_queries = 0, blocked_queries = 0, allowed_queries = 0 WHERE id = 1")
-            db.execSQL("DELETE FROM filter_events")
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+        synchronized(flushLock) {
+            eventQueue.clear()
+            pendingCount.set(0)
+            val db = dbHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                db.execSQL("UPDATE statistics SET total_queries = 0, blocked_queries = 0, allowed_queries = 0 WHERE id = 1")
+                db.execSQL("DELETE FROM filter_events")
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            _statsState.value = ProtectionStats(0, 0, 0)
         }
-        _statsState.value = ProtectionStats(0, 0, 0)
     }
 }
 
