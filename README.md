@@ -125,13 +125,8 @@ flowchart TD
 
 ### Build Commands
 ```powershell
-# Run all unit tests
 .\gradlew.bat testDebugUnitTest
-
-# Assemble debug APK
 .\gradlew.bat assembleDebug
-
-# Assemble release APK
 .\gradlew.bat assembleRelease
 ```
 
