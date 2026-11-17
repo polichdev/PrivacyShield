@@ -1,7 +1,8 @@
 ﻿package com.example.privacyshield.ui.screens
 
-import android.content.Intent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -22,30 +24,29 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.privacyshield.R
+import com.example.privacyshield.data.AppPolicy
 import com.example.privacyshield.data.AppPolicyRepository
+import com.example.privacyshield.ui.theme.OrangePrimary
 import com.example.privacyshield.ui.theme.PrivacyCyan
-import com.example.privacyshield.ui.theme.TextSecondary
+import com.example.privacyshield.vpn.ProtectionController
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
-data class AppInfo(
-    val packageName: String,
-    val appName: String,
-    val isFiltered: Boolean
-)
+typealias AppInfo = AppPolicy
 
 @Composable
 fun ApplicationsScreen(
@@ -53,35 +54,15 @@ fun ApplicationsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val policiesVersion by appPolicyRepository.policiesVersion.collectAsState()
+    val scope = rememberCoroutineScope()
     var searchQuery by rememberSaveable { mutableStateOf("") }
-    var appsList by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
+    var appsList by remember { mutableStateOf<List<AppPolicy>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(appsList.isEmpty()) }
 
-    LaunchedEffect(policiesVersion) {
-        appsList = withContext(Dispatchers.IO) {
-        val pm = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN, null).apply {
-            addCategory(Intent.CATEGORY_LAUNCHER)
-        }
-        val resolveInfos = pm.queryIntentActivities(intent, 0)
-        val filteredPackages = appPolicyRepository.getFilteredPackages()
-
-        val apps = resolveInfos
-            .filter { it.activityInfo.packageName != context.packageName }
-            .map {
-                val pkg = it.activityInfo.packageName
-                val name = it.loadLabel(pm).toString()
-                AppInfo(
-                    packageName = pkg,
-                    appName = name,
-                    isFiltered = filteredPackages.contains(pkg)
-                )
-            }
-            .distinctBy { it.packageName }
-            .sortedBy { it.appName.lowercase() }
-
-        apps
-        }
+    LaunchedEffect(Unit) {
+        val loaded = appPolicyRepository.getInstalledApps(context)
+        appsList = loaded
+        isLoading = false
     }
 
     val filteredApps = remember(searchQuery, appsList) {
@@ -95,49 +76,68 @@ fun ApplicationsScreen(
         }
     }
 
-    LazyColumn(
+    Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
-        item {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(stringResource(R.string.search_apps_hint), color = MaterialTheme.colorScheme.onSurfaceVariant) },
-                singleLine = true,
-                shape = RoundedCornerShape(20.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrivacyCyan,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
-                )
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp),
+            placeholder = { Text(stringResource(R.string.search_apps_hint), color = MaterialTheme.colorScheme.onSurfaceVariant) },
+            singleLine = true,
+            shape = RoundedCornerShape(20.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = PrivacyCyan,
+                unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
             )
-        }
+        )
 
-        items(filteredApps, key = { it.packageName }) { app ->
-            AppPolicyRow(
-                app = app,
-                onToggle = { isEnabled ->
-                    appPolicyRepository.setAppFiltered(app.packageName, app.appName, isEnabled)
-                    com.example.privacyshield.vpn.ProtectionController.reload(context)
+        if (isLoading && appsList.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = OrangePrimary)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(filteredApps, key = { it.packageName }) { app ->
+                    AppPolicyRow(
+                        app = app,
+                        onToggle = { isEnabled ->
+                            appsList = appsList.map {
+                                if (it.packageName == app.packageName) it.copy(isFiltered = isEnabled) else it
+                            }
+                            appPolicyRepository.updateCachedAppFiltered(app.packageName, isEnabled)
+                            scope.launch(Dispatchers.IO) {
+                                appPolicyRepository.setAppFiltered(app.packageName, app.appName, isEnabled)
+                                ProtectionController.reload(context)
+                            }
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 }
 
 @Composable
 private fun AppPolicyRow(
-    app: AppInfo,
+    app: AppPolicy,
     onToggle: (Boolean) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Row(
             modifier = Modifier
@@ -164,11 +164,10 @@ private fun AppPolicyRow(
                 checked = app.isFiltered,
                 onCheckedChange = onToggle,
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = androidx.compose.ui.graphics.Color.White,
-                    checkedTrackColor = com.example.privacyshield.ui.theme.OrangePrimary
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = OrangePrimary
                 )
             )
         }
     }
 }
-

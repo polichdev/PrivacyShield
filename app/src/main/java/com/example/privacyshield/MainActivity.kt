@@ -47,6 +47,9 @@ import com.example.privacyshield.data.DatabaseHelper
 import com.example.privacyshield.data.RuleRepository
 import com.example.privacyshield.data.SettingsRepository
 import com.example.privacyshield.data.StatisticsRepository
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.example.privacyshield.ui.screens.ApplicationsScreen
 import com.example.privacyshield.ui.screens.DashboardScreen
 import com.example.privacyshield.ui.screens.FiltersScreen
@@ -116,6 +119,16 @@ class MainActivity : ComponentActivity() {
 
         val dashboardViewModel = DashboardViewModel(statisticsRepository, ruleRepository)
         val filtersViewModel = FiltersViewModel(ruleRepository)
+
+        dbHelper.populateFullStarterAssetAsync { count ->
+            if (count > 0) {
+                ruleRepository.notifyRulesChanged()
+            }
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            appPolicyRepository.getInstalledApps(applicationContext)
+        }
 
         setContent {
             PrivacyShieldTheme(light = getSharedPreferences("appearance", 0).getBoolean("light", false)) {

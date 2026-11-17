@@ -145,7 +145,6 @@ class DohUpstreamDnsResolver(
                 }
             }
         } catch (_: Exception) {
-            // If DoH fails or times out, fallback to UDP
         }
 
         return fallbackUdpResolver.resolve(queryPayload)

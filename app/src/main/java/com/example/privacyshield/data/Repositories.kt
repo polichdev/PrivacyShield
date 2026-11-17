@@ -2,15 +2,18 @@
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import com.example.privacyshield.filtering.DomainName
 import com.example.privacyshield.filtering.DomainRule
 import com.example.privacyshield.filtering.DomainRuleMatcher
 import com.example.privacyshield.filtering.RuleMatch
 import com.example.privacyshield.filtering.RuleSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -46,6 +49,10 @@ class RuleRepository(private val dbHelper: DatabaseHelper) {
 
     private val _rulesVersion = MutableStateFlow(0)
     val rulesVersion: StateFlow<Int> = _rulesVersion.asStateFlow()
+
+    fun notifyRulesChanged() {
+        _rulesVersion.value += 1
+    }
 
     @Synchronized
     fun getCustomRules(): List<CustomRule> {
@@ -409,6 +416,46 @@ class AppPolicyRepository(private val dbHelper: DatabaseHelper) {
             }
         }
         return set
+    }
+
+    @Volatile
+    private var cachedApps: List<AppPolicy>? = null
+
+    suspend fun getInstalledApps(context: Context): List<AppPolicy> = withContext(Dispatchers.IO) {
+        val filtered = getFilteredPackages()
+        val existing = cachedApps
+        if (existing != null) {
+            return@withContext existing.map { it.copy(isFiltered = filtered.contains(it.packageName)) }
+        }
+
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_MAIN, null).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val resolveInfos = pm.queryIntentActivities(intent, 0)
+
+        val loaded = resolveInfos
+            .filter { it.activityInfo.packageName != context.packageName }
+            .map {
+                val pkg = it.activityInfo.packageName
+                val name = it.activityInfo.nonLocalizedLabel?.toString() ?: it.loadLabel(pm).toString()
+                AppPolicy(
+                    packageName = pkg,
+                    appName = name,
+                    isFiltered = filtered.contains(pkg)
+                )
+            }
+            .distinctBy { it.packageName }
+            .sortedBy { it.appName.lowercase() }
+
+        cachedApps = loaded
+        loaded
+    }
+
+    fun updateCachedAppFiltered(packageName: String, isFiltered: Boolean) {
+        cachedApps = cachedApps?.map {
+            if (it.packageName == packageName) it.copy(isFiltered = isFiltered) else it
+        }
     }
 }
 
